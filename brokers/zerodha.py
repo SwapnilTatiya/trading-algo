@@ -91,7 +91,64 @@ class ZerodhaBroker(BrokerBase):
     def get_quote(self, symbol, exchange):
         if ":" not in symbol:   
             symbol = exchange + ":" + symbol
-        return self.kite.quote(symbol)
+        quote = self.kite.quote(symbol)[symbol]
+        return {
+            "symbol": symbol,
+            "last_price": quote['last_price'],
+            "instrument_token": quote['instrument_token']
+        }
+    
+    def find_instrument(self, symbol_initials, option_type, ltp, gap):
+        if self.instruments_df is None:
+            self.download_instruments()
+
+        if option_type == "PE":
+            symbol_gap = -gap
+        else:
+            symbol_gap = gap
+            
+        target_strike = ltp + symbol_gap
+        
+        df = self.instruments_df[
+            (self.instruments_df['tradingsymbol'].str.startswith(symbol_initials)) &
+            (self.instruments_df['instrument_type'] == option_type) &
+            (self.instruments_df['segment'] == "NFO-OPT")
+        ]
+        
+        if df.empty:
+            return None
+            
+        df['target_strike_diff'] = (df['strike'] - target_strike).abs()
+        
+        tolerance = self._get_strike_difference(symbol_initials) / 2
+        df = df[df['target_strike_diff'] <= tolerance]
+        
+        if df.empty:
+            logger.error(f"No instrument found for {symbol_initials} {option_type} "
+                        f"within {tolerance} of {target_strike}")
+            return None
+            
+        best = df.sort_values('target_strike_diff').iloc[0]
+        return best.to_dict()
+
+    def _get_strike_difference(self, symbol_initials):
+        if self.instruments_df is None:
+            self.download_instruments()
+
+        ce_instruments = self.instruments_df[
+            self.instruments_df['tradingsymbol'].str.startswith(symbol_initials) & 
+            self.instruments_df['tradingsymbol'].str.endswith('CE')
+        ]
+        
+        if ce_instruments.shape[0] < 2:
+            logger.error(f"Not enough CE instruments found for {symbol_initials} to calculate strike difference")
+            return 0
+
+        ce_instruments_sorted = ce_instruments.sort_values('strike')
+
+        top2 = ce_instruments_sorted.head(2)
+
+        return abs(top2.iloc[1]['strike'] - top2.iloc[0]['strike'])
     
     def place_gtt_order(self, symbol, quantity, price, transaction_type, order_type, exchange, product, tag="Unknown"):
         if order_type not in ["LIMIT", "MARKET"]:
